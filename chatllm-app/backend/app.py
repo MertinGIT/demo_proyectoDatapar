@@ -1,4 +1,3 @@
-# app.py
 from fastapi import FastAPI, HTTPException, Depends, status
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -9,8 +8,6 @@ from datetime import datetime
 import os
 import asyncio
 
-# Importa la biblioteca para tu LLM local
-# Por ejemplo, para usar llama-cpp-python:
 from llama_cpp import Llama
 
 app = FastAPI()
@@ -202,7 +199,7 @@ async def send_message(request: MessageRequest):
     conversations[conversation_id].messages.append(bot_message)
     conversations[conversation_id].last_message = bot_response_text[:30] + "..." if len(bot_response_text) > 30 else bot_response_text
     
-    # Guardar conversación
+    
     save_conversation(conversation_id)
     
     return bot_message
