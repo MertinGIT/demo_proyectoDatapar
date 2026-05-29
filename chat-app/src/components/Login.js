@@ -28,7 +28,7 @@ function Login({ onLogin }) {
     <div className="login-container">
       <div className="login-box">
         <div className="login-left">
-          <h1 className="app-title">IA Datapar</h1>
+          <h1 className="app-title">Chatbot</h1>
         </div>
         <div className="login-right">
           <form onSubmit={handleSubmit} className="login-form">

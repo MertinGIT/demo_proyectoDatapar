@@ -35,7 +35,7 @@ function Register() {
     <div className="register-container">
       <div className="register-box">
         <div className="register-left">
-          <h1 className="app-title">IA Datapar</h1>
+          <h1 className="app-title">Chatbot</h1>
         </div>
         <div className="register-right">
           <h2 className="form-title">Crear Cuenta</h2>

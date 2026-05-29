@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Depends, status
+from fastapi import FastAPI, HTTPException, Depends, status, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Dict, Optional
@@ -7,8 +7,12 @@ import json
 from datetime import datetime
 import os
 import asyncio
+from pathlib import Path
+import shutil
+from typing import Any
 
-from llama_cpp import Llama
+from openai import OpenAI
+import chromadb
 
 app = FastAPI()
 
@@ -24,17 +28,34 @@ app.add_middleware(
 # Ruta donde se guardarán las conversaciones
 CONVERSATIONS_DIR = "conversations"
 os.makedirs(CONVERSATIONS_DIR, exist_ok=True)
+UPLOADS_DIR = "uploads"
+os.makedirs(UPLOADS_DIR, exist_ok=True)
+VECTOR_DIR = "chroma_db"
+os.makedirs(VECTOR_DIR, exist_ok=True)
 
-# Inicializar el modelo LLM (ajusta según tu modelo específico)
-# Ejemplo con llama.cpp
-MODEL_PATH = "C:/models/llama-2-7b.Q2_K.gguf"
+def load_env_file():
+    env_path = Path(__file__).with_name(".env")
+    if not env_path.exists():
+        return
 
- # Cambia esto a la ruta de tu modelo
-llm = Llama(
-    model_path=MODEL_PATH,
-    n_ctx=2048,  # Tamaño de contexto
-    n_threads=4  # Número de hilos para inferencia
-)
+    for raw_line in env_path.read_text().splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        os.environ.setdefault(key.strip(), value.strip())
+
+load_env_file()
+
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+if not OPENAI_API_KEY:
+    raise RuntimeError("Falta configurar OPENAI_API_KEY")
+
+client = OpenAI(api_key=OPENAI_API_KEY)
+CHAT_MODEL = os.getenv("OPENAI_CHAT_MODEL", "gpt-4o")
+EMBEDDING_MODEL = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
+chroma_client = chromadb.PersistentClient(path=VECTOR_DIR)
+documents_collection = chroma_client.get_or_create_collection(name="uploaded_documents")
 
 # Modelos de datos
 class Message(BaseModel):
@@ -42,6 +63,7 @@ class Message(BaseModel):
     text: str
     sender: str
     timestamp: Optional[datetime] = None
+    embedding: Optional[List[float]] = None
 
 class Conversation(BaseModel):
     id: str
@@ -60,31 +82,69 @@ class ConversationResponse(BaseModel):
     preview: str
     timestamp: datetime
 
+class DocumentResponse(BaseModel):
+    id: str
+    name: str
+    uploaded_by: str
+    uploaded_at: datetime
+    file_path: str
+
 # Almacenamiento de conversaciones en memoria
 conversations: Dict[str, Conversation] = {}
+documents: Dict[str, DocumentResponse] = {}
 
 # Generar respuesta del LLM
+async def generate_embedding(text: str) -> List[float]:
+    response = await asyncio.to_thread(
+        client.embeddings.create,
+        model=EMBEDDING_MODEL,
+        input=text
+    )
+    return response.data[0].embedding
+
+
+def safe_text_from_file(file_path: str) -> str:
+    try:
+        return Path(file_path).read_text(encoding="utf-8")
+    except Exception:
+        return ""
+
+
+async def index_document(document_id: str, name: str, content: str, metadata: Dict[str, Any]):
+    if not content.strip():
+        content = name
+    embedding = await generate_embedding(content[:8000])
+    documents_collection.upsert(
+        ids=[document_id],
+        documents=[content],
+        metadatas=[metadata],
+        embeddings=[embedding],
+    )
+
+
 async def generate_llm_response(conversation_id: str, user_message: str) -> str:
-    # Construir el historial de la conversación para dar contexto al modelo
-    conversation_history = ""
+    messages = [
+        {
+            "role": "system",
+            "content": "Eres un asistente conversacional claro, útil y breve."
+        }
+    ]
+
     if conversation_id in conversations:
         for msg in conversations[conversation_id].messages:
-            prefix = "User: " if msg.sender == "user" else "Assistant: "
-            conversation_history += f"{prefix}{msg.text}\n"
-    
-    # Agregar el mensaje actual
-    prompt = f"{conversation_history}User: {user_message}\nAssistant:"
-    
-    # Generar respuesta del modelo
-    response = llm(
-        prompt=prompt,
-        max_tokens=512,
-        stop=["User:", "\n\n"],
-        echo=False
+            role = "assistant" if msg.sender == "bot" else "user"
+            messages.append({"role": role, "content": msg.text})
+
+    messages.append({"role": "user", "content": user_message})
+
+    response = await asyncio.to_thread(
+        client.chat.completions.create,
+        model=CHAT_MODEL,
+        messages=messages,
+        temperature=0.7
     )
-    
-    # Extraer y limpiar la respuesta
-    return response['choices'][0]['text'].strip()
+
+    return response.choices[0].message.content.strip()
 
 # Guardar conversación en disco
 def save_conversation(conversation_id: str):
@@ -180,7 +240,8 @@ async def send_message(request: MessageRequest):
         id=str(uuid.uuid4()),
         text=request.text,
         sender="user",
-        timestamp=now
+        timestamp=now,
+        embedding=await generate_embedding(request.text)
     )
     conversations[conversation_id].messages.append(user_message)
     conversations[conversation_id].last_message = request.text[:30] + "..." if len(request.text) > 30 else request.text
@@ -194,7 +255,8 @@ async def send_message(request: MessageRequest):
         id=str(uuid.uuid4()),
         text=bot_response_text,
         sender="bot",
-        timestamp=datetime.now()
+        timestamp=datetime.now(),
+        embedding=await generate_embedding(bot_response_text)
     )
     conversations[conversation_id].messages.append(bot_message)
     conversations[conversation_id].last_message = bot_response_text[:30] + "..." if len(bot_response_text) > 30 else bot_response_text
@@ -230,6 +292,48 @@ async def delete_conversation(conversation_id: str):
         os.remove(file_path)
     
     return None
+
+
+@app.get("/documents", response_model=List[DocumentResponse])
+async def list_documents():
+    return list(documents.values())
+
+
+@app.post("/documents/upload", response_model=DocumentResponse)
+async def upload_document(
+    file: UploadFile = File(...),
+    uploaded_by: str = Form("Sistema")
+):
+    document_id = str(uuid.uuid4())
+    extension = Path(file.filename).suffix
+    stored_name = f"{document_id}{extension}"
+    file_path = os.path.join(UPLOADS_DIR, stored_name)
+
+    with open(file_path, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+
+    content = safe_text_from_file(file_path)
+    now = datetime.now()
+    document = DocumentResponse(
+        id=document_id,
+        name=file.filename,
+        uploaded_by=uploaded_by,
+        uploaded_at=now,
+        file_path=file_path,
+    )
+    documents[document_id] = document
+    await index_document(
+        document_id=document_id,
+        name=file.filename,
+        content=content or file.filename,
+        metadata={
+            "name": file.filename,
+            "uploaded_by": uploaded_by,
+            "uploaded_at": now.isoformat(),
+            "file_path": file_path,
+        },
+    )
+    return document
 
 if __name__ == "__main__":
     import uvicorn

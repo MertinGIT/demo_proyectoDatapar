@@ -1,6 +1,9 @@
-import React, { useState } from 'react';
+import React, { useRef, useState } from 'react';
+import axios from 'axios';
 import { Routes, Route, Link, useNavigate } from 'react-router-dom';
 import './AdminPanel.css';
+
+const API_URL = 'http://localhost:8000';
 
 // Subcomponents for the admin panel
 const Dashboard = ({ users, documents }) => (
@@ -66,7 +69,7 @@ const UserManagement = ({ users, handleDeleteUser }) => (
 );
 
 
-const DocumentManagement = ({ documents, handleDeleteDocument }) => (
+const DocumentManagement = ({ documents, handleDeleteDocument, onUploadClick }) => (
   <div className="content-section">
     <h2>Gestión de Documentos</h2>
     <div className="table-container">
@@ -97,7 +100,7 @@ const DocumentManagement = ({ documents, handleDeleteDocument }) => (
         </tbody>
       </table>
     </div>
-    <button className="btn-add">Cargar Documento</button>
+    <button className="btn-add" onClick={onUploadClick}>Cargar Documento</button>
   </div>
 );
 
@@ -138,7 +141,9 @@ const RoleManagement = ({ setShowRoleModal }) => (
 
 const AdminPanel = ({ username, onLogout }) => {
   const navigate = useNavigate();
+  const fileInputRef = useRef(null);
   const [showRoleModal, setShowRoleModal] = useState(false);
+  const [uploading, setUploading] = useState(false);
   const [users, setUsers] = useState([
     { id: '001', name: 'Juan Pérez', email: 'juan@ejemplo.com', role: 'Administrador' },
     { id: '002', name: 'Ana Gómez', email: 'ana@ejemplo.com', role: 'Editor' },
@@ -156,6 +161,44 @@ const AdminPanel = ({ username, onLogout }) => {
 
   const handleDeleteDocument = (id) => {
     setDocuments(documents.filter(doc => doc.id !== id));
+  };
+
+  const handleUploadClick = () => {
+    fileInputRef.current?.click();
+  };
+
+  const handleFileChange = async (event) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    const formData = new FormData();
+    formData.append('file', file);
+    formData.append('uploaded_by', username || 'Sistema');
+
+    setUploading(true);
+    try {
+      await axios.post(`${API_URL}/documents/upload`, formData, {
+        headers: {
+          'Content-Type': 'multipart/form-data',
+        },
+      });
+      alert('Documento subido correctamente');
+      setDocuments(prev => [
+        {
+          id: String(Date.now()),
+          name: file.name,
+          uploadedBy: username || 'Sistema',
+          date: new Date().toLocaleDateString('es-PY'),
+        },
+        ...prev,
+      ]);
+    } catch (error) {
+      console.error('Error al subir documento:', error);
+      alert('No se pudo subir el archivo');
+    } finally {
+      setUploading(false);
+      event.target.value = '';
+    }
   };
 
   const handleLogout = () => {
@@ -197,7 +240,7 @@ const AdminPanel = ({ username, onLogout }) => {
         <Routes>
           <Route path="/" element={<Dashboard users={users} documents={documents} />} />
           <Route path="/users" element={<UserManagement users={users} handleDeleteUser={handleDeleteUser} />} />
-          <Route path="/documents" element={<DocumentManagement documents={documents} handleDeleteDocument={handleDeleteDocument} />} />
+          <Route path="/documents" element={<DocumentManagement documents={documents} handleDeleteDocument={handleDeleteDocument} onUploadClick={handleUploadClick} />} />
           <Route path="/roles" element={<RoleManagement setShowRoleModal={setShowRoleModal} />} />
           <Route path="/settings" element={<div className="content-section"><h2>Configuración</h2><p>Opciones de configuración del sistema</p></div>} />
         </Routes>
@@ -252,6 +295,13 @@ const AdminPanel = ({ username, onLogout }) => {
           </div>
         </div>
       )}
+      <input
+        ref={fileInputRef}
+        type="file"
+        className="hidden-file-input"
+        onChange={handleFileChange}
+      />
+      {uploading && <div className="upload-status">Subiendo archivo...</div>}
     </div>
   );
 };
